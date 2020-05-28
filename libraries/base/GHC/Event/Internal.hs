@@ -6,6 +6,8 @@ module GHC.Event.Internal
     -- * Event back end
       Backend
     , backend
+    , IOAction
+    , IOResult(..)
     , delete
     , poll
     , modifyFd
@@ -37,6 +39,22 @@ import GHC.Word (Word64)
 import GHC.Num (Num(..))
 import GHC.Show (Show(..))
 import Data.Semigroup.Internal (stimesMonoid)
+
+
+data IOAction -- TODO add actions
+    -- IOAction_Read IOActionID ...
+    -- IOAction_Write IOActionID ...
+    -- ...
+
+data IOResult
+    -- | An event has occurred for a file handle. See IOAction_SetFdEvents and
+    -- IOAction_SetFdEventsOnce.
+    = IOResult_Event Fd Event
+
+    -- IOResult_Read IOActionID ...
+    -- IOResult_Write IOActionID ...
+    -- ...
+
 
 -- | An I\/O event.
 newtype Event = Event Int
@@ -161,10 +179,11 @@ data Backend = forall a. Backend {
 
     -- | Poll backend for new events.  The provided callback is called
     -- once per file descriptor with new events.
-    , _bePoll :: a                          -- backend state
-              -> Maybe Timeout              -- timeout in milliseconds ('Nothing' for non-blocking poll)
-              -> (Fd -> Event -> IO ())     -- I/O callback
-              -> IO Int
+    , _bePoll
+        :: a                    -- backend state
+        -> Maybe Timeout        -- timeout in milliseconds ('Nothing' for non-blocking poll)
+        -> (IOResult -> IO ())  -- I/O callback
+        -> IO Int               -- ???? negative is error, 0 is success but no IOResults found, positive is success with IO Results. ???
 
     -- | Register, modify, or unregister interest in the given events
     -- on the given file descriptor.
@@ -172,48 +191,60 @@ data Backend = forall a. Backend {
                   -> Fd       -- file descriptor
                   -> Event    -- old events to watch for ('mempty' for new)
                   -> Event    -- new events to watch for ('mempty' to delete)
-                  -> IO Bool
+                  -> IO Bool  -- The Bool indicates True for success,
+                              -- False for a known failure, else this may throw
+                              -- with `throwErrno`.
 
     -- | Register interest in new events on a given file descriptor, set
     -- to be deactivated after the first event.
     , _beModifyFdOnce :: a
                          -> Fd    -- file descriptor
                          -> Event -- new events to watch
-                         -> IO Bool
+                         -> IO Bool -- Bool indicates success (see _beModifyFd)
+
+    -- | Perform some IO action (non-blocking).
+    , _beDoIOAction
+        :: a
+        -> IOAction          -- action to perform
+        -> Maybe (IO Bool)   -- Nothing if the io action is not supported, and
+                             -- the caller should use Fd Events instead. Else
+                             -- Just the action to do the (non-blocking) IO
+                             -- action. Bool indicates success (see _beModifyFd).
 
     , _beDelete :: a -> IO ()
     }
 
-backend :: (a -> Maybe Timeout -> (Fd -> Event -> IO ()) -> IO Int)
+backend :: (a -> Maybe Timeout -> (IOResult -> IO ()) -> IO Int)
         -> (a -> Fd -> Event -> Event -> IO Bool)
         -> (a -> Fd -> Event -> IO Bool)
+        -> (a -> IOAction -> Maybe (IO Bool))
         -> (a -> IO ())
         -> a
         -> Backend
-backend bPoll bModifyFd bModifyFdOnce bDelete state =
-  Backend state bPoll bModifyFd bModifyFdOnce bDelete
+backend bPoll bModifyFd bModifyFdOnce bDoIOAction bDelete state =
+  Backend state bPoll bModifyFd bModifyFdOnce bDoIOAction bDelete
 {-# INLINE backend #-}
 
-poll :: Backend -> Maybe Timeout -> (Fd -> Event -> IO ()) -> IO Int
-poll (Backend bState bPoll _ _ _) = bPoll bState
+poll :: Backend -> Maybe Timeout -> (IOResult -> IO ()) -> IO Int
+poll (Backend bState bPoll _ _ _ _) = bPoll bState
 {-# INLINE poll #-}
 
 -- | Returns 'True' if the modification succeeded.
 -- Returns 'False' if this backend does not support
 -- event notifications on this type of file.
 modifyFd :: Backend -> Fd -> Event -> Event -> IO Bool
-modifyFd (Backend bState _ bModifyFd _ _) = bModifyFd bState
+modifyFd (Backend bState _ bModifyFd _ _ _) = bModifyFd bState
 {-# INLINE modifyFd #-}
 
 -- | Returns 'True' if the modification succeeded.
 -- Returns 'False' if this backend does not support
 -- event notifications on this type of file.
 modifyFdOnce :: Backend -> Fd -> Event -> IO Bool
-modifyFdOnce (Backend bState _ _ bModifyFdOnce _) = bModifyFdOnce bState
+modifyFdOnce (Backend bState _ _ bModifyFdOnce _ _) = bModifyFdOnce bState
 {-# INLINE modifyFdOnce #-}
 
 delete :: Backend -> IO ()
-delete (Backend bState _ _ _ bDelete) = bDelete bState
+delete (Backend bState _ _ _ _ bDelete) = bDelete bState
 {-# INLINE delete #-}
 
 -- | Throw an 'Prelude.IOError' corresponding to the current value of
