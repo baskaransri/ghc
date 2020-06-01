@@ -238,25 +238,10 @@ padLiveArgs plat live =
     calcPad rs = getFPRPadding (getFPRCtor $ head rs) rs
 
 getFPRPadding :: (Int -> GlobalReg) -> LiveGlobalRegs -> [(Bool, GlobalReg)]
-getFPRPadding paddingCtor live = padding
+getFPRPadding paddingCtor live = map (\i -> (True, paddingCtor i) paddingRegNums
     where
-        fprRegNums = sort $ map fprRegNum live
-        (_, padding) = foldl assignSlots (1, []) $ fprRegNums
-
-        assignSlots (i, acc) regNum
-            | i == regNum = -- don't need padding here
-                  (i+1, acc)
-            | i < regNum = let -- add padding for slots i .. regNum-1
-                  numNeeded = regNum-i
-                  acc' = genPad i numNeeded ++ acc
-                in
-                  (regNum+1, acc')
-            | otherwise = error "padLiveArgs -- i > regNum ??"
-
-        genPad start n =
-            take n $ flip map (iterate (+1) start) (\i ->
-                (True, paddingCtor i))
-
+        fprRegNums = map fprRegNum live
+        paddingRegNums = [1 .. maximum fprRegNums] \\ fprRegNums
 
 -- | Llvm standard fun attributes
 llvmStdFunAttrs :: [LlvmFuncAttr]
